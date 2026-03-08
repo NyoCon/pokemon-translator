@@ -273,6 +273,33 @@
 
     .error-msg button:hover { background: #c0392b; color: #fff; }
 
+    .experimental-badge {
+      font-size: 0.6rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffc107;
+      border-radius: 3px;
+      padding: 1px 4px;
+      vertical-align: middle;
+    }
+
+    .category-badge {
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    td code {
+      font-size: 0.82rem;
+      background: #f0f0f0;
+      border-radius: 3px;
+      padding: 1px 5px;
+      white-space: nowrap;
+    }
+
     footer {
       text-align: center;
       margin-top: 24px;
@@ -294,6 +321,7 @@
         <button class="tab active" data-cat="pokemon">Pokemon</button>
         <button class="tab" data-cat="moves">Moves</button>
         <button class="tab" data-cat="items">Items</button>
+        <button class="tab" data-cat="easychat">Retro Mail <span class="experimental-badge">experimental</span></button>
       </div>
 
       <div class="search-row">
@@ -312,138 +340,212 @@
     </div>
 
     <footer>
-      Data from <a href="https://pokeapi.co/" target="_blank">PokéAPI</a>
+      Data from <a href="https://pokeapi.co/" target="_blank">PokéAPI</a> &middot;
+      Retro Mail words from <a href="https://gist.github.com/Bl4ckSh4rk/cf1e1aab540964bbeb8097404393b24d" target="_blank">Bl4ckSh4rk</a>
     </footer>
   </div>
 
   <script>
-    const CACHE_KEY = 'pokemon_translator_v2';
-    const GQL = 'https://beta.pokeapi.co/graphql/v1beta';
-    const LANGS = ['en','de','fr','it','es'];
-    const LANG_LABELS = { en: 'English', de: 'Deutsch', fr: 'Français', it: 'Italiano', es: 'Español' };
-    // PokeAPI language IDs
-    const LANG_IDS = { fr: 5, de: 6, es: 7, it: 8, en: 9 };
-    const LANG_ID_MAP = Object.fromEntries(Object.entries(LANG_IDS).map(([k,v]) => [v,k]));
+    const CACHE_KEY    = 'pokemon_translator_v2';
+    const EC_CACHE_KEY = 'pokemon_easychat_v1';
+    const GQL          = 'https://beta.pokeapi.co/graphql/v1beta';
+    const GIST_BASE    = 'https://gist.githubusercontent.com/Bl4ckSh4rk/cf1e1aab540964bbeb8097404393b24d/raw/';
+    const EC_FILES     = { en: 'g3_dict_eng.txt', de: 'g3_dict_ger.txt', fr: 'g3_dict_fre.txt', it: 'g3_dict_ita.txt', es: 'g3_dict_spa.txt' };
 
+    const LANGS      = ['en','de','fr','it','es'];
+    const LANG_LABELS = { en: 'English', de: 'Deutsch', fr: 'Français', it: 'Italiano', es: 'Español' };
+    const LANG_IDS   = { fr: 5, de: 6, es: 7, it: 8, en: 9 };
+    const LANG_ID_MAP = Object.fromEntries(Object.entries(LANG_IDS).map(([k,v]) => [v,k]));
     const MAX_RESULTS = 100;
 
     // State
-    let cache = null; // { pokemon, moves, items } each = { byId: {id: {en,de,fr,it,es}}, index: {lang: {lower_name: id}} }
+    let cache   = null; // PokeAPI data: { pokemon, moves, items }
+    let ecCache = null; // Easy Chat data: { byHex, index }
     let currentCat = 'pokemon';
 
     // DOM
     const searchInput = document.getElementById('searchInput');
-    const clearBtn = document.getElementById('clearBtn');
+    const clearBtn    = document.getElementById('clearBtn');
     const resultsArea = document.getElementById('resultsArea');
     const resultsInfo = document.getElementById('resultsInfo');
 
-    // --- GQL fetch helper ---
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function highlight(text, query) {
+      if (!text) return '—';
+      if (!query) return escHtml(text);
+      const idx = text.toLowerCase().indexOf(query.toLowerCase());
+      if (idx === -1) return escHtml(text);
+      return escHtml(text.slice(0, idx)) + '<mark>' + escHtml(text.slice(idx, idx + query.length)) + '</mark>' + escHtml(text.slice(idx + query.length));
+    }
+
+    const ICON_COPY  = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const ICON_CHECK = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+    function copyCell(name) {
+      return name ? `<button class="copy-btn" data-copy="${escHtml(name)}" title="Copy">${ICON_COPY}</button>` : '';
+    }
+
+    // ── PokeAPI ────────────────────────────────────────────────────────────────
+
     async function gqlFetch(query) {
-      const resp = await fetch(GQL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
-      });
+      const resp = await fetch(GQL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) });
       if (!resp.ok) throw new Error(`GraphQL error: ${resp.status}`);
       const json = await resp.json();
       if (json.errors) throw new Error(json.errors[0].message);
       return json.data;
     }
 
-    // Build category data from raw name rows
     function buildCategoryData(rows, idField) {
       const byId = {};
       for (const row of rows) {
-        const id = row[idField];
+        const id   = row[idField];
         const lang = LANG_ID_MAP[row.language_id];
         if (!lang) continue;
         if (!byId[id]) byId[id] = {};
         byId[id][lang] = row.name;
       }
-      // Build inverted index: lang -> lower_name -> id
       const index = {};
       for (const lang of LANGS) index[lang] = {};
       for (const [id, names] of Object.entries(byId)) {
         for (const lang of LANGS) {
-          if (names[lang]) {
-            index[lang][names[lang].toLowerCase()] = Number(id);
-          }
+          if (names[lang]) index[lang][names[lang].toLowerCase()] = Number(id);
         }
       }
       return { byId, index };
     }
 
-    // --- Load data ---
     async function loadData() {
-      // Try cache
       try {
         const raw = localStorage.getItem(CACHE_KEY);
-        if (raw) {
-          cache = JSON.parse(raw);
-          return;
-        }
+        if (raw) { cache = JSON.parse(raw); return; }
       } catch(e) {}
 
       showLoader('Fetching data from PokéAPI…', 'This only happens once. Please wait.');
-
-      const langFilter = '[5,6,7,8,9]';
-
+      const lf = '[5,6,7,8,9]';
       try {
-        // Parallel fetch all 3 categories
-        const [pokemonData, movesData, itemsData] = await Promise.all([
-          gqlFetch(`{ pokemon_v2_pokemonspeciesname(where: {language_id: {_in: ${langFilter}}}) { name pokemon_species_id language_id } }`),
-          gqlFetch(`{ pokemon_v2_movename(where: {language_id: {_in: ${langFilter}}}) { name move_id language_id } }`),
-          gqlFetch(`{ pokemon_v2_itemname(where: {language_id: {_in: ${langFilter}}}) { name item_id language_id } }`),
+        const [pd, md, id] = await Promise.all([
+          gqlFetch(`{ pokemon_v2_pokemonspeciesname(where: {language_id: {_in: ${lf}}}) { name pokemon_species_id language_id } }`),
+          gqlFetch(`{ pokemon_v2_movename(where: {language_id: {_in: ${lf}}}) { name move_id language_id } }`),
+          gqlFetch(`{ pokemon_v2_itemname(where: {language_id: {_in: ${lf}}}) { name item_id language_id } }`),
         ]);
-
         cache = {
-          pokemon: buildCategoryData(pokemonData.pokemon_v2_pokemonspeciesname, 'pokemon_species_id'),
-          moves:   buildCategoryData(movesData.pokemon_v2_movename, 'move_id'),
-          items:   buildCategoryData(itemsData.pokemon_v2_itemname, 'item_id'),
+          pokemon: buildCategoryData(pd.pokemon_v2_pokemonspeciesname, 'pokemon_species_id'),
+          moves:   buildCategoryData(md.pokemon_v2_movename, 'move_id'),
+          items:   buildCategoryData(id.pokemon_v2_itemname, 'item_id'),
         };
-
         try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch(e) {}
-
         showInitial();
       } catch(err) {
-        showError(err.message);
+        showError(err.message, 'retryLoad');
       }
     }
 
-    // --- Search ---
+    // ── Easy Chat ──────────────────────────────────────────────────────────────
+
+    function parseEcFile(text) {
+      // Returns: { hex -> { word, category } }
+      const result = {};
+      let currentCategory = '';
+      for (const rawLine of text.split('\n')) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const tabIdx = line.indexOf('\t');
+        if (tabIdx === -1) {
+          // Category header
+          currentCategory = line;
+        } else {
+          const hex  = line.slice(0, tabIdx).trim().toLowerCase();
+          const word = line.slice(tabIdx + 1).trim();
+          result[hex] = { word, category: currentCategory };
+        }
+      }
+      return result;
+    }
+
+    async function loadEasyChatData() {
+      try {
+        const raw = localStorage.getItem(EC_CACHE_KEY);
+        if (raw) { ecCache = JSON.parse(raw); return; }
+      } catch(e) {}
+
+      try {
+        const texts = await Promise.all(
+          LANGS.map(lang => fetch(GIST_BASE + EC_FILES[lang]).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); }))
+        );
+
+        // byHex: hex -> { en, de, fr, it, es, category }
+        const byHex = {};
+        // Use EN file as the authoritative source for categories
+        const enParsed = parseEcFile(texts[0]);
+        for (const [hex, { category }] of Object.entries(enParsed)) {
+          byHex[hex] = { category };
+        }
+        for (let i = 0; i < LANGS.length; i++) {
+          const parsed = parseEcFile(texts[i]);
+          const lang   = LANGS[i];
+          for (const [hex, { word }] of Object.entries(parsed)) {
+            if (!byHex[hex]) byHex[hex] = { category: '' };
+            byHex[hex][lang] = word;
+          }
+        }
+
+        // Inverted index: lang -> lower_word -> hex
+        const index = {};
+        for (const lang of LANGS) index[lang] = {};
+        for (const [hex, entry] of Object.entries(byHex)) {
+          for (const lang of LANGS) {
+            if (entry[lang]) index[lang][entry[lang].toLowerCase()] = hex;
+          }
+        }
+
+        ecCache = { byHex, index };
+        try { localStorage.setItem(EC_CACHE_KEY, JSON.stringify(ecCache)); } catch(e) {}
+      } catch(err) {
+        // Non-fatal: EC tab will show error when accessed
+        ecCache = { error: err.message };
+      }
+    }
+
+    // ── Search ─────────────────────────────────────────────────────────────────
+
     function search(query, cat) {
       if (!cache) return [];
       const q = query.trim().toLowerCase();
       if (q.length < 2) return [];
-
       const { byId, index } = cache[cat];
       const matchedIds = new Set();
-
       for (const lang of LANGS) {
-        const langIndex = index[lang];
-        for (const [name, id] of Object.entries(langIndex)) {
+        for (const [name, id] of Object.entries(index[lang])) {
           if (name.includes(q)) matchedIds.add(id);
           if (matchedIds.size >= MAX_RESULTS * 3) break;
         }
         if (matchedIds.size >= MAX_RESULTS * 3) break;
       }
-
       return [...matchedIds].slice(0, MAX_RESULTS).map(id => byId[id]);
     }
 
-    // --- Render ---
-    function highlight(text, query) {
-      if (!query || !text) return escHtml(text || '—');
-      const q = query.trim();
-      if (!q) return escHtml(text);
-      const idx = text.toLowerCase().indexOf(q.toLowerCase());
-      if (idx === -1) return escHtml(text);
-      return escHtml(text.slice(0, idx)) + '<mark>' + escHtml(text.slice(idx, idx + q.length)) + '</mark>' + escHtml(text.slice(idx + q.length));
+    function searchEasyChat(query) {
+      if (!ecCache || ecCache.error) return null;
+      const q = query.trim().toLowerCase();
+      if (q.length < 2) return [];
+      const { byHex, index } = ecCache;
+      const matchedHexes = new Set();
+      for (const lang of LANGS) {
+        for (const [word, hex] of Object.entries(index[lang])) {
+          if (word.includes(q)) matchedHexes.add(hex);
+          if (matchedHexes.size >= MAX_RESULTS * 3) break;
+        }
+        if (matchedHexes.size >= MAX_RESULTS * 3) break;
+      }
+      return [...matchedHexes].slice(0, MAX_RESULTS).map(hex => ({ hex, ...byHex[hex] }));
     }
 
-    function escHtml(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    }
+    // ── Render ─────────────────────────────────────────────────────────────────
 
     function renderResults(rows, query) {
       if (!rows.length) {
@@ -451,38 +553,63 @@
         resultsArea.innerHTML = `<div class="state-msg"><div class="icon">😕</div><p>No results found</p></div>`;
         return;
       }
-
       const limited = rows.length >= MAX_RESULTS;
       resultsInfo.hidden = false;
       resultsInfo.textContent = limited
         ? `Showing first ${MAX_RESULTS} results — refine your search`
         : `${rows.length} result${rows.length !== 1 ? 's' : ''}`;
 
+      const q = query.trim();
       const headerCells = LANGS.map(l => `<th>${LANG_LABELS[l]}</th>`).join('');
       const bodyRows = rows.map(names => {
         const cells = LANGS.map(lang => {
           const name = names[lang] || '';
-          const safeId = Math.random().toString(36).slice(2);
-          return `<td>
-            <div class="cell-inner">
-              <span class="name-text">${highlight(name, query)}</span>
-              ${name ? `<button class="copy-btn" data-copy="${escHtml(name)}" title="Copy"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}
-            </div>
-          </td>`;
+          return `<td><div class="cell-inner"><span class="name-text">${highlight(name, q)}</span>${copyCell(name)}</div></td>`;
         }).join('');
         return `<tr>${cells}</tr>`;
       }).join('');
 
-      resultsArea.innerHTML = `
-        <div class="results-wrapper">
-          <table>
-            <thead><tr>${headerCells}</tr></thead>
-            <tbody>${bodyRows}</tbody>
-          </table>
-        </div>`;
+      resultsArea.innerHTML = `<div class="results-wrapper"><table>
+        <thead><tr>${headerCells}</tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table></div>`;
     }
 
-    // --- UI helpers ---
+    function renderEasyChatResults(rows, query) {
+      if (!rows.length) {
+        resultsInfo.hidden = true;
+        resultsArea.innerHTML = `<div class="state-msg"><div class="icon">😕</div><p>No results found</p></div>`;
+        return;
+      }
+      const limited = rows.length >= MAX_RESULTS;
+      resultsInfo.hidden = false;
+      resultsInfo.textContent = limited
+        ? `Showing first ${MAX_RESULTS} results — refine your search`
+        : `${rows.length} result${rows.length !== 1 ? 's' : ''}`;
+
+      const q = query.trim();
+      const langHeaders = LANGS.map(l => `<th>${LANG_LABELS[l]}</th>`).join('');
+      const bodyRows = rows.map(({ hex, category, ...names }) => {
+        const hexUpper = hex.replace('0x', '0x').toUpperCase().replace('0X','0x');
+        const langCells = LANGS.map(lang => {
+          const name = names[lang] || '';
+          return `<td><div class="cell-inner"><span class="name-text">${highlight(name, q)}</span>${copyCell(name)}</div></td>`;
+        }).join('');
+        return `<tr>
+          <td><div class="cell-inner"><code>${escHtml(hexUpper)}</code>${copyCell(hexUpper)}</div></td>
+          <td><span class="category-badge">${escHtml(category)}</span></td>
+          ${langCells}
+        </tr>`;
+      }).join('');
+
+      resultsArea.innerHTML = `<div class="results-wrapper"><table>
+        <thead><tr><th>Hex</th><th>Category</th>${langHeaders}</tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table></div>`;
+    }
+
+    // ── UI helpers ─────────────────────────────────────────────────────────────
+
     function showLoader(msg, sub = '') {
       resultsInfo.hidden = true;
       resultsArea.innerHTML = `<div class="loader">
@@ -497,33 +624,40 @@
       resultsArea.innerHTML = `<div class="state-msg"><div class="icon">🔍</div><p>Start typing to search</p></div>`;
     }
 
-    function showError(msg) {
+    function showError(msg, retryFn) {
       resultsInfo.hidden = true;
       resultsArea.innerHTML = `<div class="error-msg">
         ⚠️ Failed to load data: ${escHtml(msg)}
-        <button onclick="retryLoad()">Retry</button>
+        <button onclick="${escHtml(retryFn)}()">Retry</button>
       </div>`;
     }
 
-    function retryLoad() {
-      localStorage.removeItem(CACHE_KEY);
-      cache = null;
-      loadData();
-    }
-    window.retryLoad = retryLoad;
+    function retryLoad() { localStorage.removeItem(CACHE_KEY); cache = null; loadData(); }
+    function retryEcLoad() { localStorage.removeItem(EC_CACHE_KEY); ecCache = null; loadEasyChatData().then(() => runSearch()); }
+    window.retryLoad   = retryLoad;
+    window.retryEcLoad = retryEcLoad;
 
-    // --- Event handlers ---
+    // ── Event handlers ─────────────────────────────────────────────────────────
+
+    function runSearch() {
+      const q = searchInput.value.trim();
+      if (q.length < 2) { showInitial(); resultsInfo.hidden = true; return; }
+
+      if (currentCat === 'easychat') {
+        if (!ecCache) { showLoader('Loading Easy Chat data…'); return; }
+        if (ecCache.error) { showError(ecCache.error, 'retryEcLoad'); return; }
+        renderEasyChatResults(searchEasyChat(q), q);
+      } else {
+        if (!cache) return;
+        renderResults(search(q, currentCat), q);
+      }
+    }
+
     let searchTimeout;
     searchInput.addEventListener('input', () => {
       clearBtn.classList.toggle('visible', searchInput.value.length > 0);
       clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(() => {
-        const q = searchInput.value.trim();
-        if (!cache) return;
-        if (q.length < 2) { showInitial(); resultsInfo.hidden = true; return; }
-        const rows = search(q, currentCat);
-        renderResults(rows, q);
-      }, 150);
+      searchTimeout = setTimeout(runSearch, 150);
     });
 
     clearBtn.addEventListener('click', () => {
@@ -539,13 +673,7 @@
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         currentCat = tab.dataset.cat;
-        const q = searchInput.value.trim();
-        if (cache && q.length >= 2) {
-          renderResults(search(q, currentCat), q);
-        } else {
-          showInitial();
-          resultsInfo.hidden = true;
-        }
+        runSearch();
       });
     });
 
@@ -554,26 +682,22 @@
       const btn = e.target.closest('.copy-btn');
       if (!btn) return;
       const text = btn.dataset.copy;
-      const iconCopy = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-      const iconCheck = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
       const markCopied = () => {
-        btn.innerHTML = iconCheck;
+        btn.innerHTML = ICON_CHECK;
         btn.classList.add('copied');
-        setTimeout(() => { btn.innerHTML = iconCopy; btn.classList.remove('copied'); }, 1500);
+        setTimeout(() => { btn.innerHTML = ICON_COPY; btn.classList.remove('copied'); }, 1500);
       };
       navigator.clipboard.writeText(text).then(markCopied).catch(() => {
         const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
         markCopied();
       });
     });
 
-    // --- Init ---
+    // ── Init ───────────────────────────────────────────────────────────────────
     loadData();
+    loadEasyChatData();
   </script>
 </body>
 </html>
